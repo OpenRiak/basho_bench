@@ -49,6 +49,7 @@
                 alwaysget_keyorder :: key_order|skew_order,
                 unique_size :: pos_integer(),
                 unique_keyorder :: key_order|skew_order,
+                unique_blob :: binary(),
                 postcode_indexcount = 3 :: pos_integer(),
                 postcodeq_count = rand:uniform(?QUERYLOG_FREQ)
                     :: non_neg_integer(),
@@ -250,7 +251,8 @@ new(Id) ->
         unique_keyorder = DocKeyOrder,
         keyid = KeyID,
         id = Id,
-        postcode_indexcount = PostCodeIndexCount
+        postcode_indexcount = PostCodeIndexCount,
+        unique_blob = generate_b64_blob(DocSize * 1000)
     }}.
 
 %% Get a single object.
@@ -896,7 +898,8 @@ prepare_unique_put(State) ->
                             State#state.keyid, 
                             State#state.unique_keyorder),
     
-    Value = non_compressible_value(State#state.unique_size),
+    Value =
+        random_slice_blob(State#state.unique_blob, State#state.unique_size),
     
     Robj0 = riakc_obj:new(Bucket, to_binary(Key)),
     MD1 = riakc_obj:get_update_metadata(Robj0),
@@ -1105,6 +1108,15 @@ generate_uniquekey(C, RandBytes, key_order) ->
 
 non_compressible_value(Size) ->
     crypto:strong_rand_bytes(Size).
+
+generate_b64_blob(SuperSize) ->
+    base64:encode(crypto:strong_rand_bytes(SuperSize)).
+
+random_slice_blob(Blob, Size) ->
+    TotalSize = byte_size(Blob),
+    Pre = rand:uniform(1 + TotalSize - Size) - 1,
+    <<_Discard:Pre/binary, Slice:Size/binary, _Post/binary>> = Blob,
+    Slice.
 
 
 eightytwenty_keycount(UKC) ->

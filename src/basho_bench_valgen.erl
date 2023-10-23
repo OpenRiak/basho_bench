@@ -170,7 +170,7 @@ create_semi_compressible_binary_v1() ->
 
     ComboBlockFun =
         fun(X, Acc) ->
-            Bin0 = crypto:strong_rand_bytes(256),
+            Bin0 = base64:encode(crypto:strong_rand_bytes(256)),
             Bin1 = create_random_textblock(6, RandomAscii),
             LI = lorem_ipsum(),
             LIN1 = (X rem length(LI)) + 1,
