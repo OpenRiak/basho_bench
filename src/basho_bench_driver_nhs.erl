@@ -911,7 +911,9 @@ prepare_unique_put(State) ->
 http_direct_get(Url, Timeout) ->
     Target = lists:flatten(Url),
     {ok, C} = ibrowse:spawn_worker_process(Target),
-    Response = ibrowse:send_req_direct(C, Target, [], get, [], [], Timeout),
+    Headers = [{"Connection", "close"}],
+    Response =
+        ibrowse:send_req_direct(C, Target, Headers, get, [], [], Timeout),
     ibrowse:stop_worker_process(C),
     case Response of
         {ok, "200", _, Body} ->
