@@ -240,11 +240,10 @@ worker_idle_loop(State) ->
                     ?INFO("Starting max worker: ~p on ~p~n", [self(), node()]),
                     max_worker_run_loop(State);
                 {rate, Rate} ->
-                    %% Calculate mean interarrival time in in milliseconds. A
-                    %% fixed rate worker can generate (at max) only 1k req/sec.
-                    MeanArrival = 1000 / Rate,
-                    ?INFO("Starting ~w ms/req fixed rate worker: ~p on ~p\n", [MeanArrival, self(), node()]),
-                    rate_worker_run_loop(State, 1 / MeanArrival)
+                    ?INFO(
+                        "Starting ~w persec fixed rate worker: ~p on ~p\n",
+                        [Rate, self(), node()]),
+                    rate_worker_run_loop(State, Rate)
             end
     end.
 
@@ -347,7 +346,7 @@ max_worker_run_loop(State) ->
             exit(ExitReason)
     end.
 
-rate_worker_run_loop(State, Rate) when Rate > 0->
+rate_worker_run_loop(State, Rate) when Rate > 0, Rate =< 1000 ->
     WorkerFun = fun worker_next_op/1,
     ShutdownFun = fun needs_shutdown/1,
     rate_worker_run_loop(State, Rate, WorkerFun, ShutdownFun).
