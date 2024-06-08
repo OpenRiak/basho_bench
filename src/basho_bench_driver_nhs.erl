@@ -28,7 +28,7 @@
             run_listkeys/1,
             run_segmentfold/1]).
 
--include("basho_bench.hrl").
+-include("../include/basho_bench.hrl").
 
 -define(QUERYLOG_FREQ, 2000).
 -define(FORCEAAE_FREQ, 10). % Every 10 seconds
@@ -64,7 +64,8 @@
                 alwaysget_key_count = 1 :: non_neg_integer(),
                 keyid :: binary(),
                 id :: pos_integer(),
-                last_forceaae = os:timestamp() :: erlang:timestamp()
+                last_forceaae = os:timestamp() :: erlang:timestamp(),
+                conditional_put = false :: boolean()
          }).
 
 
@@ -153,6 +154,9 @@ new(Id) ->
         basho_bench_config:get(unique, {8000, key_order}),
     
     NodeID = basho_bench_config:get(node_name, node()),
+
+    ConditionalPut = basho_bench_config:get(conditional_put, false),
+
     Host = inet_parse:ntoa(HTTPTargetIp),
     URLFun =
         fun(Bucket) ->
@@ -252,7 +256,8 @@ new(Id) ->
         keyid = KeyID,
         id = Id,
         postcode_indexcount = PostCodeIndexCount,
-        unique_blob = generate_b64_blob(DocSize * 1000)
+        unique_blob = generate_b64_blob(DocSize * 1000),
+        conditional_put = ConditionalPut
     }}.
 
 %% Get a single object.
@@ -369,7 +374,7 @@ run(alwaysget_updatewith2i, _KeyGen, ValueGen, State) ->
     case {Robj0, NewAGKC} of
         {error, Reason} ->
             {error, Reason, State};
-        {Robj0, NewAGKC} ->
+        _ ->
             MD0 = riakc_obj:get_update_metadata(Robj0),
             MD1 = riakc_obj:clear_secondary_indexes(MD0),
             MD2 =
@@ -379,10 +384,21 @@ run(alwaysget_updatewith2i, _KeyGen, ValueGen, State) ->
             Robj1 = riakc_obj:update_value(Robj0, Value),
             Robj2 = riakc_obj:update_metadata(Robj1, MD2),
 
+            Opts =
+                case State#state.conditional_put of
+                    true ->
+                        [if_not_modified];
+                    false ->
+                        []
+                end,
+
             %% Write the object...
-            case riakc_pb_socket:put(Pid, Robj2, State#state.pb_timeout) of
+            case riakc_pb_socket:put(Pid, Robj2, Opts, State#state.pb_timeout) of
                 ok ->
                     {ok, State#state{alwaysget_key_count = NewAGKC}};
+                {error, <<"modified">>} ->
+                    ?WARN("Unexpected conflict at key count", [NewAGKC]),
+                    {error, <<"modified">>, State};
                 {error, Reason} ->
                     {error, Reason, State}
             end
@@ -441,7 +457,7 @@ run(alwaysget_updatewith2i_http, _KeyGen, ValueGen, State) ->
     case {Robj0, NewAGKC} of
         {error, Reason} ->
             {error, Reason, State};
-        {Robj0, NewAGKC} ->
+        _ ->
             MD0 = riakc_obj:get_update_metadata(Robj0),
             MD1 = riakc_obj:clear_secondary_indexes(MD0),
             MD2 =
@@ -451,10 +467,21 @@ run(alwaysget_updatewith2i_http, _KeyGen, ValueGen, State) ->
             Robj1 = riakc_obj:update_value(Robj0, Value),
             Robj2 = riakc_obj:update_metadata(Robj1, MD2),
 
+            Opts =
+                case State#state.conditional_put of
+                    true ->
+                        [if_not_modified, {timeout, State#state.http_timeout}];
+                    false ->
+                        [{timeout, State#state.http_timeout}]
+                end,
+
             %% Write the object...
-            case rhc:put(RHC, Robj2, [{timeout, State#state.http_timeout}]) of
+            case rhc:put(RHC, Robj2, Opts) of
                 ok ->
                     {ok, State#state{alwaysget_key_count = NewAGKC}};
+                {error, {ok, "412", _Headers, _Message}} ->
+                    ?WARN("Unexpected conflict at key count", [NewAGKC]),
+                    {error, <<"modified">>, State};
                 {error, Reason} ->
                     {error, Reason, State}
             end
