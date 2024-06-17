@@ -468,10 +468,12 @@ run(alwaysget_updatewith2i_http, _KeyGen, ValueGen, State) ->
             Robj2 = riakc_obj:update_metadata(Robj1, MD2),
 
             Opts =
-                case State#state.conditional_put of
-                    true ->
+                case {State#state.conditional_put, ToExtend} of
+                    {true, false} ->
                         [if_not_modified, {timeout, State#state.http_timeout}];
-                    false ->
+                    {true, true} ->
+                        [if_none_match, {timeout, State#state.http_timeout}];
+                    {false, _} ->
                         [{timeout, State#state.http_timeout}]
                 end,
 
