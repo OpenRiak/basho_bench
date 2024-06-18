@@ -483,7 +483,10 @@ run(alwaysget_updatewith2i_http, _KeyGen, ValueGen, State) ->
                     {ok, State#state{alwaysget_key_count = NewAGKC}};
                 {error, {ok, "412", _Headers, _Message}} ->
                     ?WARN("Unexpected conflict at key count", [NewAGKC]),
-                    {error, <<"modified">>, State};
+                    {error,
+                        <<"modified">>,
+                        State#state{alwaysget_key_count = NewAGKC}
+                    };
                 {error, Reason} ->
                     {error, Reason, State}
             end
