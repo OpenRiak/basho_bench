@@ -28,12 +28,20 @@
   0},
  {<<"riak_pb">>,
   {git,"https://github.com/OpenRiak/riak_pb",
-       {ref,"ec4e9be91a02a35a085d2ed3b8877db231c2d625"}},
-  1},
+       {ref,"a03e9be71c2857b3b65a8b68ffe421f3ca3457b8"}},
+  2},
  {<<"riakc">>,
-  {git,"https://github.com/OpenRiak/riak-erlang-client",
-       {ref,"5d82730f1631efd4efa3b3da40ada2161616f3ca"}},
-  0}]}.
+  {git,"https://github.com/nhs-riak/riak-erlang-client",
+       {ref,"70bd36f05225075a163821c5378dba9960c7ac23"}},
+  1},
+ {<<"riakhttpc">>,
+  {git,"https://github.com/OpenRiak/riak-erlang-http-client",
+       {ref,"7b3f60b6109b5e4807c102feb5ae6658cd1b63ec"}},
+  0},
+ {<<"webmachine">>,
+  {git,"https://github.com/webmachine/webmachine.git",
+       {ref,"ee5f28f672b4f21a34e126d7384bc311d59077e4"}},
+  1}]}.
 [
 {pkg_hash,[
  {<<"bear">>, <<"16264309AE5D005D03718A5C82641FCC259C9E8F09ADEB6FD79CA4271168656F">>},
