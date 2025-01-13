@@ -35,6 +35,7 @@
 
 -record(state, {
                 pb_pid,
+                http_client,
                 repl_pid,
                 http_host,
                 http_port,
@@ -48,6 +49,7 @@
                 alwaysget_keyorder :: key_order|skew_order,
                 unique_size :: pos_integer(),
                 unique_keyorder :: key_order|skew_order,
+                unique_blob :: binary(),
                 postcode_indexcount = 3 :: pos_integer(),
                 postcodeq_count = rand:uniform(?QUERYLOG_FREQ)
                     :: non_neg_integer(),
@@ -61,6 +63,7 @@
                 unique_key_lowcount = 1 :: non_neg_integer(),
                 alwaysget_key_count = 1 :: non_neg_integer(),
                 keyid :: binary(),
+                id :: pos_integer(),
                 last_forceaae = os:timestamp() :: erlang:timestamp()
          }).
 
@@ -209,45 +212,48 @@ new(Id) ->
     end,
 
     KeyIDint = erlang:phash2(Id) bxor erlang:phash2(NodeID),
-    ?INFO("Using Node ID ~w to generate ID ~w\n", [node(), KeyIDint]), 
+    KeyID = <<KeyIDint:32/integer>>,
+    ?INFO(
+        "Using Node ID ~w and Id ~w to generate ID ~w ~w ~s\n",
+        [node(), Id, KeyID, KeyIDint, convert_tolist(KeyID)]),
+    NominatedID = Id == 7,
 
-    case riakc_pb_socket:start_link(PBTargetIp, PBTargetPort) of
-        {ok, Pid} ->
-            NominatedID = Id == 7,
-            ReplPid = 
-                case riakc_pb_socket:start_link(ReplTargetIp, ReplTargetPort) of
-                    {ok, RP} ->
-                        RP;
-                    _ ->
-                        _ = lager:info("Starting with no repl check"),
-                        no_repl_check
-                end,
-            {ok, #state {
-               pb_pid = Pid,
-               repl_pid = ReplPid,
-               http_host = HTTPTargetIp,
-               http_port = HTTPTargetPort,
-               recordBucket = RecordBucket,
-               documentBucket = DocumentBucket,
-               pb_timeout = PBTimeout,
-               http_timeout = HTTPTimeout,
-               fold_timeout = FoldTimeout,
-               query_logfreq = ?QUERYLOG_FREQ,
-               nominated_id = NominatedID,
-               unique_key_count = 1,
-               alwaysget_key_count = 0,
-               alwaysget_perworker_maxkeycount = AGMaxKC,
-               alwaysget_perworker_minkeycount = AGMinKC,
-               alwaysget_keyorder = AGKeyOrder,
-               unique_size = DocSize,
-               unique_keyorder = DocKeyOrder,
-               keyid = <<KeyIDint:32/integer>>,
-               postcode_indexcount = PostCodeIndexCount
-            }};
-        {error, Reason2} ->
-            ?FAIL_MSG("Failed to connect riakc_pb_socket to ~p port ~p: ~p\n",
-                      [PBTargetIp, PBTargetPort, Reason2])
-    end.
+    {ok, PBCPid} = riakc_pb_socket:start_link(PBTargetIp, PBTargetPort),
+    ReplPid = 
+        case riakc_pb_socket:start_link(ReplTargetIp, ReplTargetPort) of
+            {ok, RP} ->
+                RP;
+            _ ->
+                _ = lager:info("Starting with no repl check"),
+                no_repl_check
+        end,
+    HTTPClient = rhc:create(Host, HTTPTargetPort, "riak", []),
+    
+    {ok, #state {
+        pb_pid = PBCPid,
+        http_client = HTTPClient,
+        repl_pid = ReplPid,
+        http_host = HTTPTargetIp,
+        http_port = HTTPTargetPort,
+        recordBucket = RecordBucket,
+        documentBucket = DocumentBucket,
+        pb_timeout = PBTimeout,
+        http_timeout = HTTPTimeout,
+        fold_timeout = FoldTimeout,
+        query_logfreq = ?QUERYLOG_FREQ,
+        nominated_id = NominatedID,
+        unique_key_count = 1,
+        alwaysget_key_count = 0,
+        alwaysget_perworker_maxkeycount = AGMaxKC,
+        alwaysget_perworker_minkeycount = AGMinKC,
+        alwaysget_keyorder = AGKeyOrder,
+        unique_size = DocSize,
+        unique_keyorder = DocKeyOrder,
+        keyid = KeyID,
+        id = Id,
+        postcode_indexcount = PostCodeIndexCount,
+        unique_blob = generate_b64_blob(DocSize * 1000)
+    }}.
 
 %% Get a single object.
 run(get_pb, KeyGen, _ValueGen, State) ->
@@ -264,21 +270,20 @@ run(get_pb, KeyGen, _ValueGen, State) ->
     end;
 
 run(alwaysget_http, _KeyGen, _ValueGen, State) ->
-    Host = inet_parse:ntoa(State#state.http_host),
-    Port = State#state.http_port,
+    RHC = State#state.http_client,
     Bucket = State#state.recordBucket,
     AGKC = State#state.alwaysget_key_count,
     case AGKC > State#state.alwaysget_perworker_minkeycount of 
         true ->
             KeyInt = eightytwenty_keycount(AGKC),    
-            Key = generate_uniquekey(KeyInt, State#state.keyid, 
-                                        State#state.alwaysget_keyorder),
-            URL = 
-                io_lib:format("http://~s:~p/buckets/~s/keys/~s", 
-                                [Host, Port, Bucket, Key]),
-
-            case get_existing(URL, State#state.http_timeout) of
-                ok ->
+            Key =
+                generate_uniquekey(
+                    KeyInt, State#state.keyid, State#state.alwaysget_keyorder),
+            
+            case rhc:get(
+                    RHC, Bucket, Key,
+                    [{timeout, State#state.http_timeout}]) of
+                {ok, _RObj} ->
                     {ok, State};
                 {error, Reason} ->
                     % not_found is not OK
@@ -296,12 +301,12 @@ run(alwaysget_pb, _KeyGen, _ValueGen, State) ->
     case AGKC > State#state.alwaysget_perworker_minkeycount of 
         true ->
             KeyInt = eightytwenty_keycount(AGKC),    
-            Key = generate_uniquekey(KeyInt, State#state.keyid, 
-                                        State#state.alwaysget_keyorder),
+            Key =
+                generate_uniquekey(
+                    KeyInt, State#state.keyid, State#state.alwaysget_keyorder),
 
-            case riakc_pb_socket:get(Pid, 
-                                        Bucket, Key, 
-                                        State#state.pb_timeout) of
+            case riakc_pb_socket:get(
+                    Pid, Bucket, Key, State#state.pb_timeout) of
                 {ok, _Obj} ->
                     {ok, State};
                 {error, Reason} ->
@@ -315,6 +320,7 @@ run(alwaysget_pb, _KeyGen, _ValueGen, State) ->
     end;
 
 run(alwaysget_updatewith2i, _KeyGen, ValueGen, State) ->
+
     Pid = State#state.pb_pid,
     Bucket = State#state.recordBucket,
     AGKC = State#state.alwaysget_key_count,
@@ -328,51 +334,141 @@ run(alwaysget_updatewith2i, _KeyGen, ValueGen, State) ->
             true ->
                 % Expand the key count
                 ExpansionKey = 
-                    generate_uniquekey(AGKC + 1, State#state.keyid,
-                                        State#state.alwaysget_keyorder),
+                    generate_uniquekey(
+                        AGKC + 1,
+                        State#state.keyid,
+                        State#state.alwaysget_keyorder),
                 case {AGKC rem 1000, State#state.nominated_id} of
                     {0, true} ->
-                        _ = lager:info("Always grow key count passing ~w "
-                                    ++ "for nominated worker", 
-                                [AGKC]);
+                        _ = 
+                            lager:info(
+                                "Always grow key count passing ~w "
+                                "for nominated worker", 
+                                [AGKC]
+                            );
                     _ ->
                         ok
                 end,
-                {riakc_obj:new(Bucket, ExpansionKey),
-                    AGKC + 1};
+                {riakc_obj:new(Bucket, ExpansionKey), AGKC + 1};
             false ->
                 % update an existing key
                 ExistingKey = 
-                    generate_uniquekey(KeyInt, State#state.keyid,
-                                        State#state.alwaysget_keyorder),
-                {ok, Robj} =
-                    riakc_pb_socket:get(Pid, 
-                                        Bucket, ExistingKey, 
-                                        State#state.pb_timeout),
-                {Robj, AGKC}
+                    generate_uniquekey(
+                        KeyInt,
+                        State#state.keyid,
+                        State#state.alwaysget_keyorder),
+                GetR =
+                    riakc_pb_socket:get(
+                        Pid, Bucket, ExistingKey, State#state.pb_timeout),
+                case GetR of
+                    {ok, Robj} ->
+                        {Robj, AGKC};
+                    {error, GetReason} ->
+                        {error, GetReason}
+                end
         end,
     
-    MD0 = riakc_obj:get_update_metadata(Robj0),
-    MD1 = riakc_obj:clear_secondary_indexes(MD0),
-    MD2 =
-        riakc_obj:set_secondary_index(
-            MD1,
-            generate_binary_indexes(State#state.postcode_indexcount)),
-    Robj1 = riakc_obj:update_value(Robj0, Value),
-    Robj2 = riakc_obj:update_metadata(Robj1, MD2),
-
-    %% Write the object...
-    case riakc_pb_socket:put(Pid, Robj2, State#state.pb_timeout) of
-        ok ->
-            {ok, State#state{alwaysget_key_count = NewAGKC}};
+    case {Robj0, NewAGKC} of
         {error, Reason} ->
-            {error, Reason, State}
+            {error, Reason, State};
+        {Robj0, NewAGKC} ->
+            MD0 = riakc_obj:get_update_metadata(Robj0),
+            MD1 = riakc_obj:clear_secondary_indexes(MD0),
+            MD2 =
+                riakc_obj:set_secondary_index(
+                    MD1,
+                    generate_binary_indexes(State#state.postcode_indexcount)),
+            Robj1 = riakc_obj:update_value(Robj0, Value),
+            Robj2 = riakc_obj:update_metadata(Robj1, MD2),
+
+            %% Write the object...
+            case riakc_pb_socket:put(Pid, Robj2, State#state.pb_timeout) of
+                ok ->
+                    {ok, State#state{alwaysget_key_count = NewAGKC}};
+                {error, Reason} ->
+                    {error, Reason, State}
+            end
+    end;
+
+run(alwaysget_updatewith2i_http, _KeyGen, ValueGen, State) ->
+    
+    RHC = State#state.http_client,
+    Bucket = State#state.recordBucket,
+    AGKC = State#state.alwaysget_key_count,
+    Value = ValueGen(),
+    KeyInt = eightytwenty_keycount(AGKC),
+    ToExtend = 
+        rand:uniform(State#state.alwaysget_perworker_maxkeycount) > AGKC,
+
+    {Robj0, NewAGKC} = 
+        case ToExtend of 
+            true ->
+                % Expand the key count
+                ExpansionKey = 
+                    generate_uniquekey(
+                        AGKC + 1,
+                        State#state.keyid,
+                        State#state.alwaysget_keyorder),
+                case {AGKC rem 1000, State#state.nominated_id} of
+                    {0, true} ->
+                        _ = 
+                            lager:info(
+                                "Always grow key count passing ~w "
+                                "for nominated worker",
+                                [AGKC]
+                            );
+                    _ ->
+                        ok
+                end,
+                {riakc_obj:new(Bucket, ExpansionKey), AGKC + 1};
+            false ->
+                % update an existing key
+                ExistingKey = 
+                    generate_uniquekey(
+                        KeyInt,
+                        State#state.keyid,
+                        State#state.alwaysget_keyorder),
+                GetR =
+                    rhc:get(
+                        RHC,
+                        Bucket,
+                        ExistingKey,
+                        [{timeout, State#state.http_timeout}]),
+                case GetR of
+                    {ok, Robj} ->
+                        {Robj, AGKC};
+                    {error, GetReason} ->
+                        {error, GetReason}
+                end
+        end,
+    
+    case {Robj0, NewAGKC} of
+        {error, Reason} ->
+            {error, Reason, State};
+        {Robj0, NewAGKC} ->
+            MD0 = riakc_obj:get_update_metadata(Robj0),
+            MD1 = riakc_obj:clear_secondary_indexes(MD0),
+            MD2 =
+                riakc_obj:set_secondary_index(
+                    MD1,
+                    generate_binary_indexes(State#state.postcode_indexcount)),
+            Robj1 = riakc_obj:update_value(Robj0, Value),
+            Robj2 = riakc_obj:update_metadata(Robj1, MD2),
+
+            %% Write the object...
+            case rhc:put(RHC, Robj2, [{timeout, State#state.http_timeout}]) of
+                ok ->
+                    {ok, State#state{alwaysget_key_count = NewAGKC}};
+                {error, Reason} ->
+                    {error, Reason, State}
+            end
     end;
 
 run(alwaysget_updatewithout2i, _KeyGen, ValueGen, State) ->
     Pid = State#state.pb_pid,
     Bucket = State#state.recordBucket,
     AGKC = State#state.alwaysget_key_count,
+    KeyOrder = State#state.alwaysget_keyorder,
     Value = ValueGen(),
     KeyInt = eightytwenty_keycount(AGKC),
     ToExtend = 
@@ -383,13 +479,16 @@ run(alwaysget_updatewithout2i, _KeyGen, ValueGen, State) ->
             true ->
                 % Expand the key count
                 ExpansionKey = 
-                    generate_uniquekey(AGKC + 1, State#state.keyid,
-                                        State#state.alwaysget_keyorder),
+                    generate_uniquekey(
+                        AGKC + 1, State#state.keyid, KeyOrder),
                 case {AGKC rem 1000, State#state.nominated_id} of
                     {0, true} ->
-                        _ = lager:info("Always grow key count passing ~w "
-                                    ++ "for nominated worker", 
-                                [AGKC]);
+                        _ = 
+                            lager:info(
+                                "Always grow key count passing ~w "
+                                "for nominated worker", 
+                                [AGKC]
+                            );
                     _ ->
                         ok
                 end,
@@ -398,23 +497,32 @@ run(alwaysget_updatewithout2i, _KeyGen, ValueGen, State) ->
             false ->
                 % update an existing key
                 ExistingKey = 
-                    generate_uniquekey(KeyInt, State#state.keyid,
-                                        State#state.alwaysget_keyorder),
-                {ok, Robj} =
-                    riakc_pb_socket:get(Pid, 
-                                        Bucket, ExistingKey, 
-                                        State#state.pb_timeout),
-                {Robj, AGKC}
+                    generate_uniquekey(
+                        KeyInt, State#state.keyid, KeyOrder),
+                R = 
+                    riakc_pb_socket:get(
+                        Pid,  Bucket, ExistingKey, State#state.pb_timeout),
+                case R of 
+                    {ok, Robj} ->
+                        {Robj, AGKC};
+                    {error, GetReason} ->
+                        {error, GetReason}
+                end
         end,
     
-    Robj2 = riakc_obj:update_value(Robj0, Value),
-
-    %% Write the object...
-    case riakc_pb_socket:put(Pid, Robj2, State#state.pb_timeout) of
-        ok ->
-            {ok, State#state{alwaysget_key_count = NewAGKC}};
+    case {Robj0, NewAGKC} of
         {error, Reason} ->
-            {error, Reason, State}
+            {error, Reason, State};
+        {Robj0, NewAGKC} ->
+            Robj2 = riakc_obj:update_value(Robj0, Value),
+
+            %% Write the object...
+            case riakc_pb_socket:put(Pid, Robj2, State#state.pb_timeout) of
+                ok ->
+                    {ok, State#state{alwaysget_key_count = NewAGKC}};
+                {error, Reason} ->
+                    {error, Reason, State}
+            end
     end;
 
 
@@ -507,14 +615,24 @@ run(get_unique, _KeyGen, _ValueGen, State) ->
     Bucket = State#state.documentBucket,
     UKC = State#state.unique_key_count,
     LKC = State#state.unique_key_lowcount,
-    Key = generate_uniquekey(LKC + rand:uniform(max(1, UKC - LKC)),
-                                State#state.keyid,
-                                State#state.unique_keyorder),
+    KeyNumber = LKC + rand:uniform(max(1, UKC - LKC)),
+    Key =
+        generate_uniquekey(
+            KeyNumber, State#state.keyid, State#state.unique_keyorder),
     case riakc_pb_socket:get(Pid, Bucket, Key, State#state.pb_timeout) of
         {ok, _Obj} ->
             {ok, State};
         {error, notfound} ->
-            {ok, State};
+            case KeyNumber of
+                KN when KeyNumber >= UKC; KeyNumber =< LKC ->
+                    _ = lager:info("Key Number ~p out of range", [KN]),
+                    {ok, State};
+                _ ->
+                    _ =
+                        lager:warning(
+                            "Unexpected unique key not found ~p", [Key]),
+                    {error, notfound, State}
+            end;
         {error, Reason} ->
             {error, Reason, State}
     end;
@@ -524,17 +642,93 @@ run(delete_unique, _KeyGen, _ValueGen, State) ->
     Pid = State#state.pb_pid,
     B = State#state.documentBucket,
     UKC = State#state.unique_key_count,
-    LKC = State#state.unique_key_lowcount,
+    LKC = State#state.unique_key_lowcount + 1,
     case LKC < UKC of
         true ->
-            Key = generate_uniquekey(LKC,
-                                        State#state.keyid,
-                                        State#state.unique_keyorder),
+            Key =
+                generate_uniquekey(
+                    LKC, State#state.keyid, State#state.unique_keyorder),
             R = riakc_pb_socket:delete(Pid, B, Key, State#state.pb_timeout),
             case R of
                 ok ->
+                    {ok, State#state{unique_key_lowcount = LKC}};
+                {error, Reason} ->
+                    {error, Reason, State#state{unique_key_lowcount = LKC}}
+            end;
+        false ->
+            {ok, State}
+    end;
+
+run(put_unique_http, _KeyGen, _ValueGen, State) ->
+    RHC = State#state.http_client,
+    {_Pid, _Bucket, Key, Robj, UKC} = prepare_unique_put(State),
+    log_if(
+        State#state.id,
+        "put_unique Key ~p ~w ~w",
+        [Key, State#state.unique_key_lowcount, UKC]),
+    %% Write the object...
+    case rhc:put(RHC, Robj, [{timeout, State#state.http_timeout}]) of
+        ok ->
+            {ok, State#state{unique_key_count = UKC + 1}};
+        {error, Reason} ->
+            {error, Reason, State}
+    end;
+run(get_unique_http, _KeyGen, _ValueGen, State) ->    
+    % Get one of the objects with unique keys
+    RHC = State#state.http_client,
+    Bucket = State#state.documentBucket,
+    UKC = State#state.unique_key_count,
+    LKC = State#state.unique_key_lowcount,
+    KeyNumber = LKC + rand:uniform(max(1, UKC - LKC)),
+    Key = 
+        generate_uniquekey(
+            KeyNumber, State#state.keyid, State#state.unique_keyorder),
+    case rhc:get(RHC, Bucket, Key, [{timeout, State#state.http_timeout}]) of
+        {ok, _Obj} ->
+            {ok, State};
+        {error, notfound} ->
+            case KeyNumber of
+                KN when KeyNumber >= UKC; KeyNumber =< LKC ->
+                    log_if(
+                        State#state.id,
+                        "get_unique key out of range ~p ~w ~w ~w",
+                        [Key, KN, LKC, UKC]),
+                    {ok, State};
+                KN ->
+                    _ = 
+                        lager:warning(
+                            "id ~w get_unique key notfound ~p ~w ~w ~w",
+                            [State#state.id, Key, KN, LKC, UKC]
+                        ),
+                    {error, notfound, State}
+            end;
+        {error, Reason} ->
+            {error, Reason, State}
+    end;
+run(delete_unique_http, _KeyGen, _ValueGen, State) ->
+    %% Delete one of the unique keys, assuming that the deletions have not
+    %% caught up with the PUTs
+    RHC = State#state.http_client,
+    B = State#state.documentBucket,
+    UKC = State#state.unique_key_count,
+    LKC = State#state.unique_key_lowcount,
+    case LKC < UKC of
+        true ->
+            Key = 
+                generate_uniquekey(
+                    LKC, State#state.keyid, State#state.unique_keyorder),
+            R = rhc:delete(RHC, B, Key, [{timeout, State#state.http_timeout}]),
+            case R of
+                ok ->
+                    {ok, State#state{unique_key_lowcount = LKC + 1}};
+                {error, notfound} ->
                     {ok, State#state{unique_key_lowcount = LKC + 1}};
                 {error, Reason} ->
+                    _ = 
+                        lager:warning(
+                            "id ~w delete_unique key notfound ~p ~w ~w",
+                            [State#state.id, Key, LKC, UKC]
+                        ),
                     {error, Reason, State#state{unique_key_lowcount = LKC + 1}}
             end;
         false ->
@@ -557,7 +751,7 @@ run(postcodequery_http, _KeyGen, _ValueGen, State) ->
     URL = io_lib:format("http://~s:~p/buckets/~s/index/postcode_bin/~s/~s",
                     [Host, Port, Bucket, StartKey, EndKey]),
 
-    case jsonb_pool_get(URL, State#state.http_timeout) of
+    case http_direct_get(URL, State#state.http_timeout) of
         {ok, JsonB} ->
             C0 = State#state.postcodeq_count,
             case C0 rem State#state.query_logfreq of 
@@ -594,7 +788,7 @@ run(dobquery_http, _KeyGen, _ValueGen, State) ->
     URL = io_lib:format(URLSrc, 
                         [Host, Port, Bucket, DoBStart, DoBEnd, RE]),
 
-    case jsonb_pool_get(URL, State#state.http_timeout) of
+    case http_direct_get(URL, State#state.http_timeout) of
         {ok, JsonB} ->
             C0 = State#state.dobq_count,
             case C0 rem State#state.query_logfreq of 
@@ -716,7 +910,8 @@ prepare_unique_put(State) ->
                             State#state.keyid, 
                             State#state.unique_keyorder),
     
-    Value = non_compressible_value(State#state.unique_size),
+    Value =
+        random_slice_blob(State#state.unique_blob, State#state.unique_size),
     
     Robj0 = riakc_obj:new(Bucket, to_binary(Key)),
     MD1 = riakc_obj:get_update_metadata(Robj0),
@@ -725,35 +920,19 @@ prepare_unique_put(State) ->
     Robj2 = riakc_obj:update_metadata(Robj1, MD2),
     {Pid, Bucket, Key, Robj2, UKC}.
 
-jsonb_pool_get(Url, Timeout) ->
+http_direct_get(Url, Timeout) ->
     Target = lists:flatten(Url),
-    Response = ibrowse:send_req(Target, [], get, [], [], Timeout),
+    {ok, C} = ibrowse:spawn_worker_process(Target),
+    Headers = [{"Connection", "close"}],
+    Response =
+        ibrowse:send_req_direct(C, Target, Headers, get, [], [], Timeout),
+    ibrowse:stop_worker_process(C),
     case Response of
         {ok, "200", _, Body} ->
             {ok, Body};
         Other ->
             {error, Other}
     end.
-
-json_direct_get(Url, Timeout) ->
-    Target = lists:flatten(Url),
-    {ok, C} = ibrowse:spawn_worker_process(Target),
-    Response = ibrowse:send_req_direct(C, Target, [], get, [], [], Timeout),
-    case Response of
-        {ok, "200", _, Body} ->
-            {ok, mochijson2:decode(Body)};
-        Other ->
-            {error, Other}
-    end.
-
-get_existing(Url, Timeout) ->
-    case ibrowse:send_req(lists:flatten(Url), [], get, [], [], Timeout) of
-        {ok, "200", _, _Body} ->
-            ok;
-        Other ->
-            {error, Other}
-    end.
-
 
 to_binary(B) when is_binary(B) ->
     B;
@@ -786,6 +965,10 @@ check_repl(ReplPid, Bucket, Key, Timeout) ->
 %% Spawned Runners
 %% ====================================================================
 
+log_if(999, Text, Subs) ->
+    lager:info(Text, Subs);
+log_if(_, _Text, _Subs) ->
+    ok.
 
 run_aaequery(State) ->
     SW = os:timestamp(),
@@ -805,8 +988,9 @@ run_aaequery(State) ->
     URL = io_lib:format(URLSrc, 
                         [Host, Port, Bucket, KeyStart, KeyEnd, MapFoldMod]),
     
-    case json_direct_get(URL, State#state.fold_timeout) of
-        {ok, {struct, TreeL}} ->
+    case http_direct_get(URL, State#state.fold_timeout) of
+        {ok, Body} ->
+            {struct, TreeL} = mochijson2:decode(Body),
             {<<"count">>, Count} = lists:keyfind(<<"count">>, 1, TreeL),
             _ = lager:info("AAE query returned in ~w seconds covering ~s keys",
                       [timer:now_diff(os:timestamp(), SW)/1000000, Count]),
@@ -831,11 +1015,17 @@ run_listkeys(State) ->
     URL = io_lib:format(URLSrc, 
                         [Host, Port, Bucket]),
     
-    case json_direct_get(URL, State#state.fold_timeout) of
-        {ok, {struct, [{<<"keys">>, KeyList}]}} ->
-            _ = lager:info("List keys returned ~w keys in ~w seconds",
-                      [length(KeyList), 
-                        timer:now_diff(os:timestamp(), SW)/1000000]),
+    case http_direct_get(URL, State#state.fold_timeout) of
+        {ok, Body} ->
+            {struct, [{<<"keys">>, KeyList}]} = mochijson2:decode(Body),
+            _ = 
+                lager:info(
+                    "List keys returned ~w keys in ~w seconds",
+                    [
+                        length(KeyList), 
+                        timer:now_diff(os:timestamp(), SW)/1000000
+                    ]
+                ),
 
             {ok, State};
         {error, Reason} ->
@@ -872,10 +1062,17 @@ run_segmentfold(State) ->
                         [Host, Port, Bucket, KeyStart, KeyEnd, 
                             MapFoldMod, MapFoldOpts]),
     
-    case json_direct_get(URL, State#state.fold_timeout) of
-        {ok, {struct, [{<<"deltas">>, SegL}]}} ->
-            _ = lager:info("Segment fold returned in ~w seconds finding ~w keys",
-                      [timer:now_diff(os:timestamp(), SW)/1000000, length(SegL)]),
+    case http_direct_get(URL, State#state.fold_timeout) of
+        {ok, Body} ->
+            {struct, [{<<"deltas">>, SegL}]} = mochijson2:decode(Body),
+            _ = 
+                lager:info(
+                    "Segment fold returned in ~w seconds finding ~w keys",
+                    [
+                        timer:now_diff(os:timestamp(), SW)/1000000,
+                        length(SegL)
+                    ]
+                ),
             {ok, State};
         {error, Reason} ->
             io:format("[~s:~p] ERROR - Reason: ~p~n",
@@ -937,6 +1134,15 @@ generate_uniquekey(C, RandBytes, key_order) ->
 non_compressible_value(Size) ->
     crypto:strong_rand_bytes(Size).
 
+generate_b64_blob(SuperSize) ->
+    base64:encode(crypto:strong_rand_bytes(SuperSize)).
+
+random_slice_blob(Blob, Size) ->
+    TotalSize = byte_size(Blob),
+    Pre = rand:uniform(1 + TotalSize - Size) - 1,
+    <<_Discard:Pre/binary, Slice:Size/binary, _Post/binary>> = Blob,
+    Slice.
+
 
 eightytwenty_keycount(UKC) ->
     % 80% of the time choose a key in the bottom 20% of the 
@@ -951,7 +1157,7 @@ eightytwenty_keycount(UKC) ->
 
 
 convert_tolist(I) when is_integer(I) ->
-    list_to_binary(lists:flatten(io_lib:format("~9..0B", [I])));
+    list_to_binary(lists:flatten(io_lib:format("~12..0B", [I])));
 convert_tolist(Bin) ->
-    <<I:26/integer, _Tail:6/bitstring>> = Bin,
+    <<I:32/integer>> = Bin,
     convert_tolist(I).
