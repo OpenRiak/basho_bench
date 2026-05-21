@@ -740,35 +740,48 @@ run(postcodequery_http, _KeyGen, _ValueGen, State) ->
     Host = inet_parse:ntoa(State#state.http_host),
     Port = State#state.http_port,
     Bucket = State#state.recordBucket,
+    AGKC = State#state.alwaysget_key_count,
+    case AGKC > State#state.alwaysget_perworker_minkeycount of 
+        true ->
 
-    L = length(?POSTCODE_AREAS),
-    {_, Area} = lists:keyfind(rand:uniform(L), 1, ?POSTCODE_AREAS),
-    District = Area ++ integer_to_list(rand:uniform(26)),
-    StartPoints = ["ba", "ca", "da", "ea", "fa", "ga", "gb", "gc"],
-    StartPoint = lists:nth(rand:uniform(length(StartPoints)), StartPoints),
-    StartKey = District ++ "|" ++ StartPoint,
-    EndKey = District ++ "|" ++ "gd",
-    URL = io_lib:format("http://~s:~p/buckets/~s/index/postcode_bin/~s/~s",
-                    [Host, Port, Bucket, StartKey, EndKey]),
+            L = length(?POSTCODE_AREAS),
+            {_, Area} = lists:keyfind(rand:uniform(L), 1, ?POSTCODE_AREAS),
+            District = Area ++ integer_to_list(rand:uniform(26)),
+            StartPoints = ["ba", "ca", "da", "ea", "fa", "ga", "gb", "gc"],
+            StartPoint =
+                lists:nth(rand:uniform(length(StartPoints)), StartPoints),
+            StartKey = District ++ "|" ++ StartPoint,
+            EndKey = District ++ "|" ++ "gd",
+            URL = 
+                io_lib:format(
+                    "http://~s:~p/buckets/~s/index/postcode_bin/~s/~s",
+                    [Host, Port, Bucket, StartKey, EndKey]
+                ),
 
-    case http_direct_get(URL, State#state.http_timeout) of
-        {ok, JsonB} ->
-            C0 = State#state.postcodeq_count,
-            case C0 rem State#state.query_logfreq of 
-                0 ->
-                    {struct, Proplist} = mochijson2:decode(JsonB),
-                    Results = proplists:get_value(<<"keys">>, Proplist),
-                    _ = lager:info(
-                        "postcode query result size of ~w",
-                        [length(Results)]);
-                _ ->
-                    ok
-            end,
-            {ok, State#state{postcodeq_count = C0 + 1}};
-        {error, Reason} ->
-            io:format("[~s:~p] ERROR - Reason: ~p~n",
-                        [?MODULE, ?LINE, Reason]),
-            {error, Reason, State}
+            case http_direct_get(URL, State#state.http_timeout) of
+                {ok, JsonB} ->
+                    C0 = State#state.postcodeq_count,
+                    case C0 rem State#state.query_logfreq of 
+                        0 ->
+                            {struct, Proplist} = mochijson2:decode(JsonB),
+                            Results =
+                                proplists:get_value(<<"keys">>, Proplist),
+                            _ = lager:info(
+                                "postcode query result size of ~w",
+                                [length(Results)]);
+                        _ ->
+                            ok
+                    end,
+                    {ok, State#state{postcodeq_count = C0 + 1}};
+                {error, Reason} ->
+                    io:format(
+                        "[~s:~p] ERROR - Reason: ~p~n",
+                        [?MODULE, ?LINE, Reason]
+                    ),
+                    {error, Reason, State}
+            end;
+        false ->
+            {silent, State}
     end;
 
 %% Query results via the HTTP interface.
@@ -776,37 +789,51 @@ run(dobquery_http, _KeyGen, _ValueGen, State) ->
     Host = inet_parse:ntoa(State#state.http_host),
     Port = State#state.http_port,
     Bucket = State#state.recordBucket,
-    
-    RandYear = integer_to_list(rand:uniform(70) + 1950),
-    RandMonth = integer_to_list(rand:uniform(9)),
-    DoBStart = RandYear ++ "0" ++ RandMonth ++ "04",
-    DoBEnd = RandYear ++ "0" ++ RandMonth ++ "05",
-    
-    URLSrc = 
-        "http://~s:~p/buckets/~s/index/dateofbirth_bin/~s/~s?term_regex=~s",
-    RE= "[0-9]{8}...[a-d]",
-    URL = io_lib:format(URLSrc, 
-                        [Host, Port, Bucket, DoBStart, DoBEnd, RE]),
 
-    case http_direct_get(URL, State#state.http_timeout) of
-        {ok, JsonB} ->
-            C0 = State#state.dobq_count,
-            case C0 rem State#state.query_logfreq of 
-                0 ->
-                    {struct, Proplist} = mochijson2:decode(JsonB),
-                    Results = proplists:get_value(<<"keys">>, Proplist),
-                    _ = lager:info(
-                        "dob query result size of ~w",
-                        [length(Results)]);
-                _ ->
-                    ok
-            end,
-            {ok, State#state{dobq_count = C0 + 1}};
-        {error, Reason} ->
-            io:format("[~s:~p] ERROR - Reason: ~p~n",
-                        [?MODULE, ?LINE, Reason]),
-            {error, Reason, State}
-        end;
+    AGKC = State#state.alwaysget_key_count,
+    case AGKC > State#state.alwaysget_perworker_minkeycount of 
+        true ->
+    
+            RandYear = integer_to_list(rand:uniform(70) + 1950),
+            RandMonth = integer_to_list(rand:uniform(9)),
+            DoBStart = RandYear ++ "0" ++ RandMonth ++ "04",
+            DoBEnd = RandYear ++ "0" ++ RandMonth ++ "05",
+            
+            URLSrc = 
+                "http://~s:~p/buckets/~s/index/dateofbirth_bin/~s/~s"
+                "?term_regex=~s",
+            RE= "[0-9]{8}...[a-d]",
+            URL = 
+                io_lib:format(
+                    URLSrc, 
+                    [Host, Port, Bucket, DoBStart, DoBEnd, RE]
+                ),
+
+            case http_direct_get(URL, State#state.http_timeout) of
+                {ok, JsonB} ->
+                    C0 = State#state.dobq_count,
+                    case C0 rem State#state.query_logfreq of 
+                        0 ->
+                            {struct, Proplist} = mochijson2:decode(JsonB),
+                            Results =
+                                proplists:get_value(<<"keys">>, Proplist),
+                            _ = lager:info(
+                                "dob query result size of ~w",
+                                [length(Results)]);
+                        _ ->
+                            ok
+                    end,
+                    {ok, State#state{dobq_count = C0 + 1}};
+                {error, Reason} ->
+                    io:format(
+                        "[~s:~p] ERROR - Reason: ~p~n",
+                        [?MODULE, ?LINE, Reason]
+                    ),
+                    {error, Reason, State}
+                end;
+        false ->
+            {silent, State}
+    end;
 
 run(aae_query, _KeyGen, _ValueGen, State) ->
     IsAlive =
